@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: asana-time-tracker
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: ASANA_APP_CLIENT_ID
+        sync: false
+      - key: ASANA_APP_CLIENT_SECRET
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: ASANA_WORKSPACE_GID
+        value: 1207860012563297
+      - key: TIME_TRACKED_FIELD_GID
+        sync: false
+    disk:
+      name: data
+      mountPath: /app/data
+      sizeGB: 1
