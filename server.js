@@ -25,6 +25,7 @@ const CONFIG = {
         planning:    '1211547841344725',
         development: '1211547841344726',
         onHold:      '1211547841344727',
+        testing:     '1211547841344728',
         completed:   '1211547841344729'
     },
     timeTrackedFieldGid: process.env.TIME_TRACKED_FIELD_GID || null
@@ -168,17 +169,16 @@ app.get('/widget', (req, res) => {
     if (!taskGid) return res.json({ template: 'summary_with_details_v0', metadata: { title: 'Time Tracker', subtitle: 'No task' }, data: { footer: '' } });
 
     const timer = stmts.getTimer.get(taskGid, userGid) || stmts.getTimerForTask.get(taskGid);
-    const hasStarted = stmts.hasTaskBeenStarted.get(taskGid, userGid);
     const completedTime = stmts.getTotalTimeForTask.get(taskGid);
     const entries = stmts.getEntriesForTask.all(taskGid);
     const timerElapsed = getTimerElapsed(timer);
     const totalSeconds = completedTime.total_seconds + timerElapsed;
 
     let statusText, statusColor;
-    if (!timer && !hasStarted) { statusText = 'Not Started'; statusColor = 'grey'; }
-    else if (timer?.status === 'running') { statusText = 'Running'; statusColor = 'green'; }
+    if (timer?.status === 'running') { statusText = 'Running'; statusColor = 'green'; }
     else if (timer?.status === 'paused') { statusText = `Paused (${formatDuration(timerElapsed)})`; statusColor = 'yellow'; }
-    else { statusText = 'Stopped'; statusColor = 'grey'; }
+    else if (entries.length > 0) { statusText = `Stopped (${formatDuration(totalSeconds)} logged)`; statusColor = 'grey'; }
+    else { statusText = 'Not Started'; statusColor = 'grey'; }
 
     const fields = [
         { name: 'Timer', type: 'pill', text: statusText, color: statusColor },
@@ -213,13 +213,11 @@ app.post('/action', async (req, res) => {
     try { const r = await asana.get(`/users/${userGid}`); userName = r.data.data.name || ''; } catch (e) { /* ignore */ }
 
     if (action === 'start') {
-        const alreadyStarted = stmts.hasTaskBeenStarted.get(taskGid, userGid);
-        if (alreadyStarted) return res.json({ error: 'Timer already started on this task. You cannot start twice.' });
         const existing = stmts.getTimer.get(taskGid, userGid);
-        if (existing) return res.json({ error: 'Timer already exists on this task.' });
+        if (existing) return res.json({ error: 'Timer already running/paused on this task. Use resume or stop first.' });
         stmts.createTimer(taskGid, userGid, userName);
-        stmts.markTaskStarted.run(taskGid, userGid);
-        await postTimeSummaryToTask(taskGid, 0, 'Timer started');
+        const completedTime = stmts.getTotalTimeForTask.get(taskGid);
+        await postTimeSummaryToTask(taskGid, completedTime.total_seconds, 'Timer started');
         return res.json({ message: 'Timer started' });
     }
 
@@ -268,24 +266,22 @@ app.get('/api/tasks/:taskGid/time', (req, res) => {
     const { taskGid } = req.params;
     const userGid = req.query.user_gid || CONFIG.defaultUserGid;
     const timer = stmts.getTimer.get(taskGid, userGid) || stmts.getTimerForTask.get(taskGid);
-    const hasStarted = stmts.hasTaskBeenStarted.get(taskGid, userGid);
     const completedTime = stmts.getTotalTimeForTask.get(taskGid);
     const entries = stmts.getEntriesForTask.all(taskGid);
     const timerElapsed = getTimerElapsed(timer);
     const totalSeconds = completedTime.total_seconds + timerElapsed;
     let availableActions = [];
-    if (!timer && !hasStarted) availableActions = ['start'];
+    if (!timer) availableActions = ['start'];
     else if (timer?.status === 'running') availableActions = ['pause', 'stop'];
     else if (timer?.status === 'paused') availableActions = ['resume', 'stop'];
-    res.json({ task_gid: taskGid, timer_status: timer ? timer.status : (hasStarted ? 'stopped' : 'not_started'), can_start: !hasStarted && !timer, current_session_seconds: timerElapsed, current_session_formatted: formatDuration(timerElapsed), total_seconds: totalSeconds, total_formatted: formatDuration(totalSeconds), available_actions: availableActions, entries });
+    res.json({ task_gid: taskGid, timer_status: timer ? timer.status : (entries.length > 0 ? 'stopped' : 'not_started'), can_start: !timer, current_session_seconds: timerElapsed, current_session_formatted: formatDuration(timerElapsed), total_seconds: totalSeconds, total_formatted: formatDuration(totalSeconds), available_actions: availableActions, entries });
 });
 
 app.post('/api/tasks/:taskGid/timer/start', (req, res) => {
     const { taskGid } = req.params; const { user_gid, user_name } = req.body;
     const userGid = user_gid || CONFIG.defaultUserGid;
-    if (stmts.hasTaskBeenStarted.get(taskGid, userGid)) return res.status(409).json({ error: 'Cannot start twice.' });
-    if (stmts.getTimer.get(taskGid, userGid)) return res.status(409).json({ error: 'Timer already exists.' });
-    stmts.createTimer(taskGid, userGid, user_name || ''); stmts.markTaskStarted.run(taskGid, userGid);
+    if (stmts.getTimer.get(taskGid, userGid)) return res.status(409).json({ error: 'Timer already active. Use resume or stop first.' });
+    stmts.createTimer(taskGid, userGid, user_name || '');
     res.json({ message: 'Timer started', task_gid: taskGid });
 });
 
@@ -374,7 +370,10 @@ async function handleStageChange(taskGid) {
     const taskRes = await asana.get(`/tasks/${taskGid}`, { params: { opt_fields: 'custom_fields,assignee,assignee.name,completed' } });
     const task = taskRes.data.data;
     const stageField = task.custom_fields?.find(f => f.gid === CONFIG.stageFieldGid);
-    if (!stageField) return;
+    if (!stageField) {
+        console.log(`[Webhook] Task ${taskGid} — No stage field found (GID: ${CONFIG.stageFieldGid})`);
+        return;
+    }
 
     const stageGid = stageField.enum_value?.gid || null;
     const stageName = stageField.enum_value?.name || 'None';
@@ -382,47 +381,66 @@ async function handleStageChange(taskGid) {
     const userName = task.assignee?.name || 'System';
     const { stageValues } = CONFIG;
 
-    console.log(`[Webhook] Task ${taskGid} — Stage: ${stageName}`);
+    // Look up timer: try exact user match first, then any timer for this task
+    const findTimer = () => stmts.getTimer.get(taskGid, userGid) || stmts.getTimerForTask.get(taskGid);
 
-    // Planning / Development → START or RESUME
-    if (stageGid === stageValues.planning || stageGid === stageValues.development) {
-        const timer = stmts.getTimer.get(taskGid, userGid);
+    console.log(`[Webhook] Task ${taskGid} — Stage: ${stageName} (GID: ${stageGid}) — Assignee: ${userName} (${userGid})`);
+
+    // Planning / Development / Testing → START or RESUME
+    if (stageGid === stageValues.planning || stageGid === stageValues.development || stageGid === stageValues.testing) {
+        const timer = findTimer();
         if (timer?.status === 'paused') {
-            stmts.resumeTimer(taskGid, userGid);
-            await postTimeSummaryToTask(taskGid, timer.accumulated_seconds, `Timer auto-resumed — Stage: ${stageName}`);
+            // Resume using the user_gid stored in the timer (not the current assignee)
+            stmts.resumeTimer(timer.task_gid, timer.user_gid);
+            const completedTime = stmts.getTotalTimeForTask.get(taskGid);
+            const totalSoFar = completedTime.total_seconds + (timer.accumulated_seconds || 0);
+            await postTimeSummaryToTask(taskGid, totalSoFar, `▶️ Timer auto-resumed — Stage: ${stageName} | Session so far: ${formatDuration(timer.accumulated_seconds || 0)}`);
             console.log(`[Webhook] RESUMED ${taskGid}`);
-        } else if (!timer) {
-            const alreadyStarted = stmts.hasTaskBeenStarted.get(taskGid, userGid);
-            if (!alreadyStarted) {
-                stmts.createTimer(taskGid, userGid, userName);
-                stmts.markTaskStarted.run(taskGid, userGid);
-                await postTimeSummaryToTask(taskGid, 0, `Timer auto-started — Stage: ${stageName}`);
-                console.log(`[Webhook] STARTED ${taskGid}`);
-            }
+        } else if (timer?.status === 'running') {
+            console.log(`[Webhook] Timer already running for ${taskGid}, skipping`);
+        } else {
+            // No active timer — start a new one (allows restart after previous stop)
+            stmts.createTimer(taskGid, userGid, userName);
+            const completedTime = stmts.getTotalTimeForTask.get(taskGid);
+            await postTimeSummaryToTask(taskGid, completedTime.total_seconds, `▶️ Timer auto-started — Stage: ${stageName}`);
+            console.log(`[Webhook] STARTED ${taskGid}`);
         }
     }
     // On Hold → PAUSE
     else if (stageGid === stageValues.onHold) {
-        const timer = stmts.getTimer.get(taskGid, userGid);
+        const timer = findTimer();
         if (timer?.status === 'running') {
             const elapsed = Math.floor((Date.now() - new Date(timer.last_resumed_at + 'Z').getTime()) / 1000);
             const newAcc = (timer.accumulated_seconds || 0) + elapsed;
-            stmts.pauseTimer.run('paused', newAcc, taskGid, userGid);
-            await postTimeSummaryToTask(taskGid, newAcc, 'Timer auto-paused — Stage: On Hold');
+            // Pause using the user_gid stored in the timer
+            stmts.pauseTimer.run('paused', newAcc, timer.task_gid, timer.user_gid);
+            const completedTime = stmts.getTotalTimeForTask.get(taskGid);
+            const grandTotal = completedTime.total_seconds + newAcc;
+            await postTimeSummaryToTask(taskGid, grandTotal, `⏸️ Timer auto-paused — Stage: On Hold | Session so far: ${formatDuration(newAcc)} | Total: ${formatDuration(grandTotal)}`);
             console.log(`[Webhook] PAUSED ${taskGid} at ${formatDuration(newAcc)}`);
+        } else {
+            console.log(`[Webhook] No running timer to pause for ${taskGid} (status: ${timer?.status || 'none'})`);
         }
     }
-    // Completd → STOP
+    // Completed → STOP
     else if (stageGid === stageValues.completed) {
-        const timer = stmts.getTimer.get(taskGid, userGid);
+        const timer = findTimer();
         if (timer) {
             const totalSec = getTimerElapsed(timer);
-            stmts.createEntry(taskGid, userGid, userName, timer.started_at, totalSec, 'Auto-stopped — Stage: Completed');
-            stmts.deleteTimer.run(taskGid, userGid);
+            const timerUserGid = timer.user_gid;
+            stmts.createEntry(taskGid, timerUserGid, timer.user_name || userName, timer.started_at, totalSec, 'Auto-stopped — Stage: Completed');
+            // Delete using the user_gid stored in the timer
+            stmts.deleteTimer.run(timer.task_gid, timerUserGid);
             const grand = stmts.getTotalTimeForTask.get(taskGid);
-            await postTimeSummaryToTask(taskGid, grand.total_seconds, `Timer auto-stopped — Stage: Completed | Session: ${formatDuration(totalSec)}`);
-            console.log(`[Webhook] STOPPED ${taskGid} — ${formatDuration(totalSec)}`);
+            await postTimeSummaryToTask(taskGid, grand.total_seconds, `✅ Timer auto-stopped — Stage: Completed | Session: ${formatDuration(totalSec)} | Total: ${formatDuration(grand.total_seconds)}`);
+            console.log(`[Webhook] STOPPED ${taskGid} — Session: ${formatDuration(totalSec)}, Total: ${formatDuration(grand.total_seconds)}`);
+        } else {
+            console.log(`[Webhook] No active timer to stop for ${taskGid}`);
         }
+    }
+    // Stage cleared or unknown
+    else {
+        console.log(`[Webhook] Unhandled stage GID: ${stageGid} for task ${taskGid}`);
     }
 }
 
@@ -557,8 +575,8 @@ app.listen(CONFIG.port, () => {
     console.log(`\nAsana Time Tracker running at ${CONFIG.baseUrl}`);
     console.log(`PAT configured: ${!!CONFIG.asanaPat}`);
     console.log(`\nAuto-timer rules:`);
-    console.log(`  Stage → Planning/Development = START or RESUME`);
-    console.log(`  Stage → On Hold             = PAUSE`);
-    console.log(`  Stage → Completd            = STOP`);
+    console.log(`  Stage → Planning/Development/Testing = START or RESUME`);
+    console.log(`  Stage → On Hold                      = PAUSE`);
+    console.log(`  Stage → Completed                    = STOP`);
     console.log(`\nDashboard: ${CONFIG.baseUrl}/dashboard`);
 });
