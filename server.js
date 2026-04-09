@@ -394,7 +394,7 @@ async function handleStageChange(taskGid) {
             stmts.resumeTimer(timer.task_gid, timer.user_gid);
             const completedTime = stmts.getTotalTimeForTask.get(taskGid);
             const totalSoFar = completedTime.total_seconds + (timer.accumulated_seconds || 0);
-            await postTimeSummaryToTask(taskGid, totalSoFar, `▶️ Timer auto-resumed — Stage: ${stageName} | Session so far: ${formatDuration(timer.accumulated_seconds || 0)}`);
+            await postTimeSummaryToTask(taskGid, totalSoFar, `[RESUMED] Timer auto-resumed — Stage: ${stageName} | Session so far: ${formatDuration(timer.accumulated_seconds || 0)}`);
             console.log(`[Webhook] RESUMED ${taskGid}`);
         } else if (timer?.status === 'running') {
             console.log(`[Webhook] Timer already running for ${taskGid}, skipping`);
@@ -402,7 +402,7 @@ async function handleStageChange(taskGid) {
             // No active timer — start a new one (allows restart after previous stop)
             stmts.createTimer(taskGid, userGid, userName);
             const completedTime = stmts.getTotalTimeForTask.get(taskGid);
-            await postTimeSummaryToTask(taskGid, completedTime.total_seconds, `▶️ Timer auto-started — Stage: ${stageName}`);
+            await postTimeSummaryToTask(taskGid, completedTime.total_seconds, `[STARTED] Timer auto-started — Stage: ${stageName}`);
             console.log(`[Webhook] STARTED ${taskGid}`);
         }
     }
@@ -416,7 +416,7 @@ async function handleStageChange(taskGid) {
             stmts.pauseTimer.run('paused', newAcc, timer.task_gid, timer.user_gid);
             const completedTime = stmts.getTotalTimeForTask.get(taskGid);
             const grandTotal = completedTime.total_seconds + newAcc;
-            await postTimeSummaryToTask(taskGid, grandTotal, `⏸️ Timer auto-paused — Stage: On Hold | Session so far: ${formatDuration(newAcc)} | Total: ${formatDuration(grandTotal)}`);
+            await postTimeSummaryToTask(taskGid, grandTotal, `[PAUSED] Timer auto-paused — Stage: On Hold | Session so far: ${formatDuration(newAcc)} | Total: ${formatDuration(grandTotal)}`);
             console.log(`[Webhook] PAUSED ${taskGid} at ${formatDuration(newAcc)}`);
         } else {
             console.log(`[Webhook] No running timer to pause for ${taskGid} (status: ${timer?.status || 'none'})`);
@@ -432,7 +432,7 @@ async function handleStageChange(taskGid) {
             // Delete using the user_gid stored in the timer
             stmts.deleteTimer.run(timer.task_gid, timerUserGid);
             const grand = stmts.getTotalTimeForTask.get(taskGid);
-            await postTimeSummaryToTask(taskGid, grand.total_seconds, `✅ Timer auto-stopped — Stage: Completed | Session: ${formatDuration(totalSec)} | Total: ${formatDuration(grand.total_seconds)}`);
+            await postTimeSummaryToTask(taskGid, grand.total_seconds, `[COMPLETED] Timer auto-stopped — Stage: Completed | Session: ${formatDuration(totalSec)} | Total: ${formatDuration(grand.total_seconds)}`);
             console.log(`[Webhook] STOPPED ${taskGid} — Session: ${formatDuration(totalSec)}, Total: ${formatDuration(grand.total_seconds)}`);
         } else {
             console.log(`[Webhook] No active timer to stop for ${taskGid}`);
